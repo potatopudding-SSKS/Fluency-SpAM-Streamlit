@@ -4,7 +4,6 @@ import json
 import os
 import streamlit as st
 
-# MongoDB
 try:
     from pymongo import MongoClient
     MONGO_AVAILABLE = True
@@ -34,17 +33,16 @@ def save_to_mongo(participant_dict: dict) -> bool:
         return False
 
 
-# Constants
-ALL_CATEGORIES = ["body_parts", "food", "animals", "marketplace"]
+ALL_CATEGORIES = ["body_parts", "fruitsnveg", "animals", "marketplace"]
 
 CAT2HI = {
     "body_parts":   "शरीर के अंगों",
-    "food":         "खाद्य पदार्थों",
+    "fruitsnveg":   "फल और सब्जियां",
     "animals":      "जानवरों",
     "marketplace":  "बाज़ार में मिलने वाली चीज़ें",
 }
 
-VFT_DURATION_SECONDS = 10   # 3 minutes
+VFT_DURATION_SECONDS = 10   # Should be 180 in the release version
 
 SPAM_COMPONENT_HTML = """
 <div class="spam-root">
@@ -651,7 +649,11 @@ elif step == "exit_poll_1":
         "Moderately Comfortable",
         "Most Comfortable",
     ]
-    strats = st.text_area("What strategies, if any, did you use while attempting this task?")
+    strats_1 = st.text_area("What strategies, if any, did you use while attempting the task for Animals?")
+    strats_2 = st.text_area("What strategies, if any, did you use while attempting the task for Body Parts?")
+    strats_3 = st.text_area("What strategies, if any, did you use while attempting the task for Fruits and Vegetables?")
+    strats_4 = st.text_area("What strategies, if any, did you use while attempting the task for Items found in a Marketplace")
+    strats = [strats_1, strats_2, strats_3, strats_4]
     hi_r = st.radio("How comfortable are you with reading Hindi in Devanagari?*",  opts, horizontal=True)
     hi_w = st.radio("How comfortable are you with writing Hindi in the English alphabet?*", opts, horizontal=True)
     en_r = st.radio("How comfortable are you with reading English?*",  opts, horizontal=True)
