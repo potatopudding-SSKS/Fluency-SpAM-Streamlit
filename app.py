@@ -42,7 +42,7 @@ CAT2HI = {
     "marketplace":  "बाज़ार में मिलने वाली चीज़ें",
 }
 
-VFT_DURATION_SECONDS = 10   # Should be 180 in the release version
+VFT_DURATION_SECONDS = 180   # Should be 180 in the release version
 
 SPAM_COMPONENT_HTML = """
 <div class="spam-root">
