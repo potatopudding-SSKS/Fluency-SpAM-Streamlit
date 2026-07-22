@@ -33,13 +33,12 @@ def save_to_mongo(participant_dict: dict) -> bool:
         return False
 
 
-ALL_CATEGORIES = ["body_parts", "fruitsnveg", "animals", "marketplace"]
+ALL_CATEGORIES = ["body_parts", "fruitsnveg", "animals"]
 
 CAT2HI = {
     "body_parts":   "शरीर के अंगों",
     "fruitsnveg":   "फल और सब्जियां",
     "animals":      "जानवरों",
-    "marketplace":  "बाज़ार में मिलने वाली चीज़ें",
 }
 
 VFT_DURATION_SECONDS = 180   # Should be 180 in the release version
@@ -272,15 +271,12 @@ def _build_steps():
         "vft_task_0",
         "spam_instructions",
         "spam_task_0",
-        "interval_1",
-        "vft_task_1",
-        "spam_task_1",
-        "interval_2",
-        "vft_task_2",
-        "spam_task_2",
-        "interval_3",
-        "vft_task_3",
-        "spam_task_3",
+        # "interval_1",
+        # "vft_task_1",
+        # "spam_task_1",
+        # "interval_2",
+        # "vft_task_2",
+        # "spam_task_2",
         "exit_poll_instructions",
         "exit_poll_1",
         "exit_poll_2",
