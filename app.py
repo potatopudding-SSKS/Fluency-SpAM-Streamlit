@@ -1,4 +1,5 @@
 import time
+import math
 import random
 import json
 import os
@@ -21,16 +22,19 @@ def save_to_mongo(participant_dict: dict) -> bool:
     if not MONGO_URI:
         st.error("MONGO_URI environment variable is not set.")
         return False
+    client = None
     try:
         client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client["semantic_fluency_db"]
         col = db["participants"]
         col.insert_one(participant_dict)
-        client.close()
         return True
     except Exception as exc:
         st.error(f"MongoDB error: {exc}")
         return False
+    finally:
+        if client is not None:
+            client.close()
 
 
 ALL_CATEGORIES = ["body_parts", "fruitsnveg", "animals"]
@@ -41,7 +45,7 @@ CAT2HI = {
     "animals":      "जानवरों",
 }
 
-VFT_DURATION_SECONDS = 10   # Should be 180 in the release version
+VFT_DURATION_SECONDS = 180   # Should be 180 in the release version
 
 SPAM_COMPONENT_HTML = """
 <div class="spam-root">
@@ -271,12 +275,12 @@ def _build_steps():
         "vft_task_0",
         "spam_instructions",
         "spam_task_0",
-        # "interval_1",
-        # "vft_task_1",
-        # "spam_task_1",
-        # "interval_2",
-        # "vft_task_2",
-        # "spam_task_2",
+        "interval_1",
+        "vft_task_1",
+        "spam_task_1",
+        "interval_2",
+        "vft_task_2",
+        "spam_task_2",
         "exit_poll_instructions",
         "exit_poll_1",
         "exit_poll_2",
@@ -315,6 +319,7 @@ def _init():
 
     # VFT live state
     st.session_state.vft_words_and_rts = []
+    st.session_state.word_set = set()
     st.session_state.vft_start_time = None
     st.session_state.vft_end_time = None
     st.session_state.vft_timer_done = False
@@ -330,6 +335,7 @@ def advance():
     current = st.session_state.steps[st.session_state.step_idx]
     if current.startswith("vft_task_"):
         st.session_state.vft_words_and_rts = []
+        st.session_state.word_set = set()
         st.session_state.vft_start_time = None
         st.session_state.vft_end_time = None
         st.session_state.vft_timer_done = False
@@ -344,6 +350,38 @@ def cat_for_step(step_name: str):
     """Return the category name for a vft_task_N or spam_task_N step."""
     idx = int(step_name.split("_")[-1])
     return st.session_state.cat_order[idx]
+
+
+@st.fragment(run_every=1)
+def _vft_timer_fragment(cat: str, hi_cat: str):
+    now = time.time()
+    remaining = max(0, math.ceil(st.session_state.vft_end_time - now))
+
+    if remaining <= 0:
+        st.session_state.vft_timer_done = True
+        st.rerun()
+
+    minutes, seconds = divmod(remaining, 60)
+
+    st.title(f"**{hi_cat}** से जुड़ी जितनी ज़्यादा चीज़ों के नाम बता सकते हैं, बताएं।")
+    st.markdown(
+        f"<div style='font-size:28px;font-weight:700;'>⏱ {minutes:02d}:{seconds:02d}</div>",
+        unsafe_allow_html=True,
+    )
+
+    def _on_enter():
+        word = st.session_state.vft_current_input.strip()
+        if word and word not in st.session_state.word_set:
+            rt = time.time() - st.session_state.vft_start_time
+            st.session_state.vft_words_and_rts.append((word, round(rt, 3)))
+            st.session_state.word_set.add(word)
+        st.session_state.vft_current_input = ""
+
+    st.text_input(
+        label="हर शब्द के बाद **ENTER** दबाएँ! कृपया **अंग्रेज़ी अक्षरों** का उपयोग करके **हिंदी शब्द** लिखें।",
+        key="vft_current_input",
+        on_change=_on_enter,
+    )
 
 
 # Page config 
@@ -428,25 +466,29 @@ By signing this form, I verify that I am 18 years of age or older.
 
 # General Instructions
 elif step == "gen_instructions":
-    st.text("इस प्रयोग में भाग लेने के लिए धन्यवाद!")
-    st.title("इस प्रयोग में दो चरण हैं:")
-    st.markdown("<u>प्रथम चरण में</u>, आपको एक कैटेगरी का नाम दिखाया जाएगा।", unsafe_allow_html=True)
-    st.markdown(
-        "आपको निर्धारित समय सीमा के भीतर उस कैटेगरी से संबंधित जितने संभव हो सकें, "
-        "उतने शब्द **हिंदी में** टाइप करने होंगे। \n\n जैसे \"कुत्ता\" -> \"kutta\"।"
-    )
-    st.markdown(
-        "<u>दूसरे चरण में</u>, आप पहले टाइप किए गए हर शब्द को ऐसे संगठित करें जिससे समान अर्थ वाले शब्द एक-दूसरे के ज़्यादा करीब हों।",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "इस एक्सपेरिमेंट में सिर्फ़ 4 \"ट्रायल\" होंगे, इसलिए कृपया जितना हो सके उतना सटीकता बनाए रखें।"
-    )
-    st.markdown(
-        "टाइप करते समय अथवा वस्तुओं को संगठित करते समय, शीघ्रता की आवश्यकता नहीं है, सटीकता सबसे महत्वपूर्ण है।"
-    )
-    st.markdown("जब आप शुरू करने के लिए तैयार हों, **\"कंटिन्यू\" दबाएँ।**")
-    if st.button("कंटिन्यू"):
+    gen_block = st.container()
+    with gen_block:
+        st.text("इस प्रयोग में भाग लेने के लिए धन्यवाद!")
+        st.title("इस प्रयोग में दो चरण हैं:")
+        st.markdown("<u>प्रथम चरण में</u>, आपको एक कैटेगरी का नाम दिखाया जाएगा।", unsafe_allow_html=True)
+        st.markdown(
+            "आपको निर्धारित समय सीमा के भीतर उस कैटेगरी से संबंधित जितने संभव हो सकें, "
+            "उतने शब्द **हिंदी में** टाइप करने होंगे। \n\n जैसे \"कुत्ता\" -> \"kutta\"।"
+        )
+        st.markdown(
+            "<u>दूसरे चरण में</u>, आप पहले टाइप किए गए हर शब्द को ऐसे संगठित करें जिससे समान अर्थ वाले शब्द एक-दूसरे के ज़्यादा करीब हों।",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "इस एक्सपेरिमेंट में सिर्फ़ 4 \"ट्रायल\" होंगे, इसलिए कृपया जितना हो सके उतना सटीकता बनाए रखें।"
+        )
+        st.markdown(
+            "टाइप करते समय अथवा वस्तुओं को संगठित करते समय, शीघ्रता की आवश्यकता नहीं है, सटीकता सबसे महत्वपूर्ण है।"
+        )
+        st.markdown("जब आप शुरू करने के लिए तैयार हों, **\"कंटिन्यू\" दबाएँ।**")
+        start_clicked = st.button("कंटिन्यू")
+    if start_clicked:
+        gen_block.empty()
         advance()
         st.rerun()
 
@@ -488,38 +530,16 @@ elif step.startswith("vft_task_"):
         st.session_state.vft_end_time   = time.time() + VFT_DURATION_SECONDS
         st.session_state.vft_timer_done = False
 
-    now       = time.time()
-    remaining = max(0, int(st.session_state.vft_end_time - now))
-    minutes, seconds = divmod(remaining, 60)
-
-    st.title(f"**{hi_cat}** से जुड़ी जितनी ज़्यादा चीज़ों के नाम बता सकते हैं, बताएं।")
-    st.markdown(
-        f"<div style='font-size:28px;font-weight:700;'>⏱ {minutes:02d}:{seconds:02d}</div>",
-        unsafe_allow_html=True,
-    )
-
-    # Input box (only while timer is running)
-    if remaining > 0:
-        def _on_enter():
-            word = st.session_state.vft_current_input.strip()
-            if word:
-                rt = time.time() - st.session_state.vft_start_time
-                st.session_state.vft_words_and_rts.append((word, round(rt, 3)))
-            st.session_state.vft_current_input = ""
-
-        st.text_input(
-            label="हर शब्द के बाद **ENTER** दबाएँ! कृपया **अंग्रेज़ी अक्षरों** का उपयोग करके **हिंदी शब्द** लिखें।",
-            key="vft_current_input",
-            on_change=_on_enter,
-        )
-        # Auto-refresh every second to update the countdown
-        time.sleep(1)
-        st.rerun()
+    if not st.session_state.vft_timer_done:
+        _vft_timer_fragment(cat, hi_cat)
     else:
-        # Timer expired
+        st.title(f"**{hi_cat}** से जुड़ी जितनी ज़्यादा चीज़ों के नाम बता सकते हैं, बताएं।")
+        st.markdown(
+            "<div style='font-size:28px;font-weight:700;'>⏱ 00:00</div>",
+            unsafe_allow_html=True,
+        )
         st.info("समय समाप्त! आगे बढ़ने के लिए नीचे दबाएँ।")
         if st.button("अगली टास्क पर जाएं"):
-            # Save data
             st.session_state.p["categories"][cat] = {
                 "words_and_rts": st.session_state.vft_words_and_rts[:],
                 "words_and_coords": {},
@@ -531,32 +551,36 @@ elif step.startswith("vft_task_"):
 
 # SpAM Instructions
 elif step == "spam_instructions":
-    st.title("अब, आप एक स्पेशियल अरेंजमेंट टास्क शुरू करेंगे।")
-    st.markdown(
-        "इस टास्क में, आपको उन शब्दों का सेट दिखाया जाएगा "
-        "जो आपने पिछले वर्बल फ्लुएंसी टास्क में टाइप किए थे।"
-    )
-    st.markdown(
-        "हमें यह जानना है कि आपके अनुसार ये शब्द एक-दूसरे से कितने मिलते-जुलते हैं। "
-        "आपका काम है हर शब्द को इस तरह मूव करना कि समान शब्द एक-दूसरे के करीब आ जाएं।"
-    )
-    st.markdown(
-        "*(पास होने का मतलब है ज़्यादा समानता, दूर होने का मतलब है ज़्यादा असमानता)*"
-    )
-    st.markdown(
-        "शब्द एक बॉक्स के ऊपरी बाएँ कोने में एक-एक करके दिखाई देंगे। "
-        "बस उन्हें क्लिक और ड्रैग करके हिलाएँ।"
-    )
-    st.markdown(
-        "हर शब्द को ड्रैग करने के बाद, 2 सेकंड में अगला शब्द आएगा। "
-        "आप पहले से रखे गए शब्दों को फिर से व्यवस्थित कर सकते हैं।"
-    )
-    st.markdown(
-        "**सभी** शब्दों को कम से कम एक बार हिलाने के बाद ही "
-        "\"कंटिन्यू\" बटन दिखाई देगा।"
-    )
-    st.markdown("जब आप तैयार हों, तो **शुरू** दबाएँ।")
-    if st.button("शुरू"):
+    spam_instr_block = st.container()
+    with spam_instr_block:
+        st.title("अब, आप एक स्पेशियल अरेंजमेंट टास्क शुरू करेंगे।")
+        st.markdown(
+            "इस टास्क में, आपको उन शब्दों का सेट दिखाया जाएगा "
+            "जो आपने पिछले वर्बल फ्लुएंसी टास्क में टाइप किए थे।"
+        )
+        st.markdown(
+            "हमें यह जानना है कि आपके अनुसार ये शब्द एक-दूसरे से कितने मिलते-जुलते हैं। "
+            "आपका काम है हर शब्द को इस तरह मूव करना कि समान शब्द एक-दूसरे के करीब आ जाएं।"
+        )
+        st.markdown(
+            "*(पास होने का मतलब है ज़्यादा समानता, दूर होने का मतलब है ज़्यादा असमानता)*"
+        )
+        st.markdown(
+            "शब्द एक बॉक्स के ऊपरी बाएँ कोने में एक-एक करके दिखाई देंगे। "
+            "बस उन्हें क्लिक और ड्रैग करके हिलाएँ।"
+        )
+        st.markdown(
+            "हर शब्द को ड्रैग करने के बाद, 2 सेकंड में अगला शब्द आएगा। "
+            "आप पहले से रखे गए शब्दों को फिर से व्यवस्थित कर सकते हैं।"
+        )
+        st.markdown(
+            "**सभी** शब्दों को कम से कम एक बार हिलाने के बाद ही "
+            "\"कंटिन्यू\" बटन दिखाई देगा।"
+        )
+        st.markdown("जब आप तैयार हों, तो **शुरू** दबाएँ।")
+        start_clicked = st.button("शुरू")
+    if start_clicked:
+        spam_instr_block.empty()
         advance()
         st.rerun()
 
@@ -612,13 +636,17 @@ elif step.startswith("spam_task_"):
 
 # Interval
 elif step.startswith("interval_"):
-    st.header("अब आप अगली कैटेगरी पर जाएंगे।")
-    st.markdown(
-        "याद दिलाने के लिए, इस टास्क में आपको बड़े अक्षरों में दी गई कैटेगरी से जुड़े "
-        "जितने भी शब्द याद आएं, उन सभी को टाइप करना है।"
-    )
-    st.markdown("शुरू करने के लिए **शुरू** दबाएँ।")
-    if st.button("शुरू"):
+    interval_block = st.container()
+    with interval_block:
+        st.header("अब आप अगली कैटेगरी पर जाएंगे।")
+        st.markdown(
+            "याद दिलाने के लिए, इस टास्क में आपको बड़े अक्षरों में दी गई कैटेगरी से जुड़े "
+            "जितने भी शब्द याद आएं, उन सभी को टाइप करना है।"
+        )
+        st.markdown("शुरू करने के लिए **शुरू** दबाएँ।")
+        start_clicked = st.button("शुरू")
+    if start_clicked:
+        interval_block.empty()
         advance()
         st.rerun()
 
@@ -635,7 +663,7 @@ elif step == "exit_poll_instructions":
 
 
 
-# Exit Poll 1
+# Exit Poll 1 - strats and language comfort
 elif step == "exit_poll_1":
     st.header("Exit Poll")
     opts = [
@@ -663,7 +691,7 @@ elif step == "exit_poll_1":
 
 
 
-# Exit Poll 2  - languages
+# Exit Poll 2 - languages
 elif step == "exit_poll_2":
     st.header("Follow Up Questions:")
     first_lang = st.text_input("What is your first language?*")
@@ -696,7 +724,7 @@ elif step == "exit_poll_2":
 
 
 
-# Exit Poll 3  - language proficiency
+# Exit Poll 3 - language proficiency
 elif step == "exit_poll_3":
     st.header("Follow Up Questions:")
     st.markdown(
@@ -713,7 +741,7 @@ elif step == "exit_poll_3":
 
 
 
-# Exit Poll 4  - language acquisition order
+# Exit Poll 4 - language acquisition order
 elif step == "exit_poll_4":
     st.header("Follow Up Questions:")
     st.markdown(
@@ -730,7 +758,7 @@ elif step == "exit_poll_4":
 
 
 
-# Exit Poll 5  - location
+# Exit Poll 5 - location
 elif step == "exit_poll_5":
     st.header("Follow Up Questions:")
     states_and_uts = [
@@ -762,7 +790,7 @@ elif step == "exit_poll_5":
 
 
 
-# Exit Poll 6  - gender / age / education
+# Exit Poll 6 - gender / age / education
 elif step == "exit_poll_6":
     st.header("Follow Up Questions:")
     gender = st.radio("What is your gender?*", ["Male", "Female", "Other/Prefer not to say"], horizontal=True)
@@ -778,7 +806,7 @@ elif step == "exit_poll_6":
 
 
 
-# Exit Poll 7  - dominant hand / alertness
+# Exit Poll 7 - dominant hand / alertness
 elif step == "exit_poll_7":
     st.header("Follow Up Questions:")
     dom_hand = st.radio("What is your dominant hand?", ["Right", "Left", "Both"], horizontal=True)
@@ -794,7 +822,7 @@ elif step == "exit_poll_7":
 
 
 
-# Exit Poll 8  - open-ended
+# Exit Poll 8 - extra info
 elif step == "exit_poll_8":
     extra = st.text_area(
         "Is there any other information you would like to share that might have "
