@@ -47,6 +47,8 @@ CAT2HI = {
 
 VFT_DURATION_SECONDS = 180   # Should be 180 in the release version
 
+MATH_DURATION_SECONDS = 30   # Should be 30 in the release version
+
 SPAM_COMPONENT_HTML = """
 <div class="spam-root">
     <div id="word-drop-area" class="spam-plane" aria-label="Placement plane" tabindex="0"></div>
@@ -275,9 +277,11 @@ def _build_steps():
         "vft_task_0",
         "spam_instructions",
         "spam_task_0",
+        "distractor",
         "interval_1",
         "vft_task_1",
         "spam_task_1",
+        "distractor",
         "interval_2",
         "vft_task_2",
         "spam_task_2",
@@ -324,6 +328,14 @@ def _init():
     st.session_state.vft_end_time = None
     st.session_state.vft_timer_done = False
     st.session_state.vft_current_input = ""
+
+    # Distractor variable
+    st.session_state.math_start_time = None
+    st.session_state.math_end_time = None
+    st.session_state.math_timer_done = False
+    st.session_state.n1 = 0
+    st.session_state.n2 = 0
+    st.session_state.n3 = 0
 
     # Exit-poll intermediates
     st.session_state.lang_list = []
@@ -380,6 +392,34 @@ def _vft_timer_fragment(cat: str, hi_cat: str):
     st.text_input(
         label="हर शब्द के बाद **ENTER** दबाएँ! कृपया **अंग्रेज़ी अक्षरों** का उपयोग करके **हिंदी शब्द** लिखें।",
         key="vft_current_input",
+        on_change=_on_enter,
+    )
+
+
+@st.fragment(run_every=1)
+def _math_timer_fragment():
+    now = time.time()
+    remaining = max(0, math.ceil(st.session_state.math_end_time - now))
+
+    if remaining <= 0:
+        st.session_state.math_timer_done = True
+        st.rerun()
+
+    st.title(f"{st.session_state.n1} + {st.session_state.n2} + {st.session_state.n3} = ?")
+    # st.markdown(
+    #     f"<div style='font-size:28px;font-weight:700;'>⏱ {minutes:02d}:{seconds:02d}</div>",
+    #     unsafe_allow_html=True,
+    # )
+
+    def _on_enter():
+        st.session_state.math_current_input = ""
+        st.session_state.n1 = random.randint(1, 9)
+        st.session_state.n2 = random.randint(1, 9)
+        st.session_state.n3 = random.randint(1, 9)
+
+    st.text_input(
+        label="",
+        key="math_current_input",
         on_change=_on_enter,
     )
 
@@ -533,7 +573,7 @@ elif step.startswith("vft_task_"):
     if not st.session_state.vft_timer_done:
         _vft_timer_fragment(cat, hi_cat)
     else:
-        st.title(f"**{hi_cat}** से जुड़ी जितनी ज़्यादा चीज़ों के नाम बता सकते हैं, बताएं।")
+        st.title(f"**{hi_cat}** के जितनी ज़्यादा नाम बता सकते हैं, बताएं।")
         st.markdown(
             "<div style='font-size:28px;font-weight:700;'>⏱ 00:00</div>",
             unsafe_allow_html=True,
@@ -633,6 +673,21 @@ elif step.startswith("spam_task_"):
                     st.warning("Coords mismatch - please try again.")
 
 
+# Distractor
+elif step == "distractor":
+    if st.session_state.math_end_time is None:
+        st.session_state.math_start_time = time.time()
+        st.session_state.math_end_time   = time.time() + MATH_DURATION_SECONDS
+        st.session_state.math_timer_done = False
+    st.session_state.n1, st.session_state.n2, st.session_state.n3 = random.randint(1, 9), random.randint(1, 9), random.randint(1, 9)
+    if not st.session_state.math_timer_done:
+        _math_timer_fragment()
+    else:
+        st.info("समय समाप्त! आगे बढ़ने के लिए नीचे दबाएँ।")
+        if st.button("अगली टास्क पर जाएं"):
+            advance()
+            st.session_state.math_end_time = None
+            st.rerun()
 
 # Interval
 elif step.startswith("interval_"):
