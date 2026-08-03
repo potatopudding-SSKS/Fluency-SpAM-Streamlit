@@ -47,7 +47,7 @@ CAT2HI = {
 
 VFT_DURATION_SECONDS = 180   # Should be 180 in the release version
 
-MATH_DURATION_SECONDS = 30   # Should be 30 in the release version
+WAIT_DURATION_SECONDS = 30   # Should be 30 in the release version
 
 SPAM_COMPONENT_HTML = """
 <div class="spam-root">
@@ -277,12 +277,12 @@ def _build_steps():
         "vft_task_0",
         "spam_instructions",
         "spam_task_0",
-        "distractor",
         "interval_1",
+        "distractor",
         "vft_task_1",
         "spam_task_1",
-        "distractor",
         "interval_2",
+        "distractor",
         "vft_task_2",
         "spam_task_2",
         "exit_poll_instructions",
@@ -330,12 +330,9 @@ def _init():
     st.session_state.vft_current_input = ""
 
     # Distractor variable
-    st.session_state.math_start_time = None
-    st.session_state.math_end_time = None
-    st.session_state.math_timer_done = False
-    st.session_state.n1 = 0
-    st.session_state.n2 = 0
-    st.session_state.n3 = 0
+    st.session_state.wait_start_time = None
+    st.session_state.wait_end_time = None
+    st.session_state.wait_timer_done = False
 
     # Exit-poll intermediates
     st.session_state.lang_list = []
@@ -397,31 +394,40 @@ def _vft_timer_fragment(cat: str, hi_cat: str):
 
 
 @st.fragment(run_every=1)
-def _math_timer_fragment():
+def _wait_timer_fragment(wait_seconds: int = 30):
+    if st.session_state.wait_timer_done:
+        st.rerun(scope="app")
+        return
+    
     now = time.time()
-    remaining = max(0, math.ceil(st.session_state.math_end_time - now))
+    elapsed = now - st.session_state.wait_start_time
+    remaining = max(0, math.ceil(wait_seconds - elapsed))
+    ready = remaining <= 0
 
-    if remaining <= 0:
-        st.session_state.math_timer_done = True
-        st.rerun()
+    st.title("कृपया रुकें...")
 
-    st.title(f"{st.session_state.n1} + {st.session_state.n2} + {st.session_state.n3} = ?")
-    # st.markdown(
-    #     f"<div style='font-size:28px;font-weight:700;'>⏱ {minutes:02d}:{seconds:02d}</div>",
-    #     unsafe_allow_html=True,
-    # )
+    def _on_continue():
+        st.session_state.wait_timer_done = True
 
-    def _on_enter():
-        st.session_state.math_current_input = ""
-        st.session_state.n1 = random.randint(1, 9)
-        st.session_state.n2 = random.randint(1, 9)
-        st.session_state.n3 = random.randint(1, 9)
+    if ready:
+        st.markdown(
+            "<div style='font-size:20px;font-weight:600;color:green;'>"
+            "<br>जब आप तैयार हों, तब आगे बढ़ें।<br><br>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        st.button(
+            "आगे बढ़ें",
+            key="wait_continue_button",
+            disabled=not ready,
+            on_click=_on_continue,
+        )
+    else:
+        st.markdown(
+            f"<div style='font-size:28px;font-weight:700;'>⏱ {remaining}s</div>",
+            unsafe_allow_html=True,
+        )
 
-    st.text_input(
-        label="",
-        key="math_current_input",
-        on_change=_on_enter,
-    )
 
 
 # Page config 
@@ -675,18 +681,17 @@ elif step.startswith("spam_task_"):
 
 # Distractor
 elif step == "distractor":
-    if st.session_state.math_end_time is None:
-        st.session_state.math_start_time = time.time()
-        st.session_state.math_end_time   = time.time() + MATH_DURATION_SECONDS
-        st.session_state.math_timer_done = False
-    st.session_state.n1, st.session_state.n2, st.session_state.n3 = random.randint(1, 9), random.randint(1, 9), random.randint(1, 9)
-    if not st.session_state.math_timer_done:
-        _math_timer_fragment()
+    if st.session_state.wait_end_time is None:
+        st.session_state.wait_start_time = time.time()
+        st.session_state.wait_end_time   = time.time() + WAIT_DURATION_SECONDS
+        st.session_state.wait_timer_done = False
+    if not st.session_state.wait_timer_done:
+        _wait_timer_fragment()
     else:
         st.info("समय समाप्त! आगे बढ़ने के लिए नीचे दबाएँ।")
         if st.button("अगली चरण पर जाएं"):
             advance()
-            st.session_state.math_end_time = None
+            st.session_state.wait_end_time = None
             st.rerun()
 
 # Interval
