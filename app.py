@@ -1,11 +1,12 @@
-import time
 import math
-import random
-import json
 import os
+import random
+import time
+
 import streamlit as st
 
 try:
+    from bson import ObjectId
     from pymongo import MongoClient
     MONGO_AVAILABLE = True
 except ImportError:
@@ -15,19 +16,26 @@ MONGO_URI = os.environ.get("MONGO_URI", "")   # set this in your environment
 
 
 def save_to_mongo(participant_dict: dict) -> bool:
-    """Returns True on success, False on failure."""
+    """Returns True on success, False on failure.
+
+    The document's _id is fixed for the session, so retrying after a failure (e.g. the
+    write reached the database but the reply was lost) overwrites the same document
+    instead of adding a second copy."""
     if not MONGO_AVAILABLE:
         st.error("pymongo is not installed. Run: pip install pymongo")
         return False
     if not MONGO_URI:
         st.error("MONGO_URI environment variable is not set.")
         return False
+    if "doc_id" not in st.session_state:
+        st.session_state.doc_id = ObjectId()
+    doc = {"_id": st.session_state.doc_id, **participant_dict}
     client = None
     try:
         client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         db = client["semantic_fluency_db"]
         col = db["participants"]
-        col.insert_one(participant_dict)
+        col.replace_one({"_id": doc["_id"]}, doc, upsert=True)
         return True
     except Exception as exc:
         st.error(f"MongoDB error: {exc}")
@@ -41,13 +49,142 @@ ALL_CATEGORIES = ["body_parts", "fruitsnveg", "animals"]
 
 CAT2HI = {
     "body_parts":   "शरीर के अंगों",
-    "fruitsnveg":   "फलों और सब्जियों",
+    "fruitsnveg":   "फलों और सब्ज़ियों",
     "animals":      "जानवरों",
 }
 
 VFT_DURATION_SECONDS = 180   # Should be 180 in the release version
 
 WAIT_DURATION_SECONDS = 30   # Should be 30 in the release version
+
+# Verbal fluency input. Timing runs in the browser (performance.now()), so response times
+# are not affected by network delay; each word is stored with the seconds since the input
+# appeared. Repeats of an already-entered word are ignored, as before.
+VFT_COMPONENT_HTML = """
+<div class="vft-root">
+    <div class="vft-timer">⏱ --:--</div>
+    <label class="vft-label" for="vft-input">हर शब्द के बाद <strong>ENTER</strong> दबाएँ! कृपया <strong>अंग्रेज़ी अक्षरों</strong> का उपयोग करके <strong>हिंदी शब्द</strong> लिखें।</label>
+    <input id="vft-input" class="vft-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+    <div class="vft-done">
+        <p>समय समाप्त! आगे बढ़ने के लिए नीचे दिया गया बटन दबाएँ।</p>
+        <button class="vft-continue" type="button">आगे बढ़ें</button>
+    </div>
+</div>
+"""
+
+VFT_COMPONENT_CSS = """
+.vft-root {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+}
+
+.vft-timer {
+    font-size: 28px;
+    font-weight: 700;
+}
+
+.vft-input {
+    box-sizing: border-box;
+    width: 100%;
+    font: inherit;
+    font-size: 18px;
+    padding: 8px 10px;
+    border: 1px solid #aaa;
+    border-radius: 6px;
+}
+
+.vft-done {
+    display: none;
+}
+
+.vft-continue {
+    background-color: #2e9f5e;
+    color: white;
+    font-size: 18px;
+    font-weight: 600;
+    padding: 12px 28px;
+    border: none;
+    border-radius: 6px;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+    cursor: pointer;
+}
+"""
+
+VFT_COMPONENT_JS = """
+export default function(component) {
+    const { data, parentElement, setTriggerValue } = component;
+    const duration = Number(data?.duration_s) || 180;
+    const timer = parentElement.querySelector(".vft-timer");
+    const input = parentElement.querySelector(".vft-input");
+    const done = parentElement.querySelector(".vft-done");
+    const continueButton = parentElement.querySelector(".vft-continue");
+    if (!timer || !input || !done || !continueButton) {
+        return;
+    }
+
+    // Kept on the parent element: Streamlit can call this function again on a rerun,
+    // and that must not restart the clock or lose the words entered so far.
+    const state = parentElement.__vftState || (parentElement.__vftState = {
+        start: performance.now(),
+        entries: [],
+        seen: new Set(),
+        finished: false,
+        tick: null,
+    });
+
+    function format(seconds) {
+        const m = Math.floor(seconds / 60);
+        const s = seconds % 60;
+        return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+    }
+
+    function finish() {
+        state.finished = true;
+        clearInterval(state.tick);
+        timer.textContent = "⏱ 00:00";
+        input.disabled = true;
+        done.style.display = "block";
+    }
+
+    function update() {
+        const remaining = Math.max(0, Math.ceil(duration - (performance.now() - state.start) / 1000));
+        timer.textContent = "⏱ " + format(remaining);
+        if (remaining <= 0) {
+            finish();
+        }
+    }
+
+    input.onkeydown = (event) => {
+        if (event.key !== "Enter" || event.isComposing || state.finished) {
+            return;
+        }
+        event.preventDefault();
+        const word = input.value.trim();
+        if (word && !state.seen.has(word)) {
+            state.seen.add(word);
+            // Seconds since the input appeared, to the millisecond
+            state.entries.push([word, Math.round(performance.now() - state.start) / 1000]);
+        }
+        input.value = "";
+    };
+
+    continueButton.onclick = () => {
+        setTriggerValue("finished", state.entries);
+    };
+
+    clearInterval(state.tick);
+    if (state.finished) {
+        finish();
+    } else {
+        update();
+        state.tick = setInterval(update, 250);
+        input.focus();
+    }
+    return () => clearInterval(state.tick);
+}
+"""
 
 SPAM_COMPONENT_HTML = """
 <div class="spam-root">
@@ -69,12 +206,12 @@ SPAM_COMPONENT_CSS = """
 }
 
 .spam-plane {
+    /* Square, so x and y are normalised by the same length on every screen */
     position: relative;
+    box-sizing: border-box;
     margin: 24px auto 8px;
-    width: min(100%, 960px);
-    height: min(60vh, 560px);
-    min-height: 360px;
-    max-height: 680px;
+    width: min(100%, 70vh, 8192px);
+    aspect-ratio: 1 / 1;
     border: 2px solid #aaa;
     padding: 20px;
     overflow: hidden;
@@ -132,6 +269,8 @@ export default function(component) {
     }
 
     const movedIds = new Set();
+    const SPAWN_PX = 20;     // where each new word appears (left and top, in px)
+    const MIN_MOVE_PX = 10;  // a word counts as placed once dropped this far from there
 
     function roundTo(value, digits) {
         const factor = Math.pow(10, digits);
@@ -171,11 +310,11 @@ export default function(component) {
         }
     }
 
-    function draggable(element, onFirstMove) {
+    function draggable(element, onFirstPlaced) {
         let offsetX = 0;
         let offsetY = 0;
         let dragging = false;
-        let hasMoved = false;
+        let placed = false;
 
         element.addEventListener("pointerdown", (event) => {
             dragging = true;
@@ -200,13 +339,6 @@ export default function(component) {
 
             element.style.left = left + "px";
             element.style.top = top + "px";
-
-            if (!hasMoved) {
-                hasMoved = true;
-                if (typeof onFirstMove === "function") {
-                    onFirstMove();
-                }
-            }
         });
 
         function endDrag(event) {
@@ -216,9 +348,16 @@ export default function(component) {
             dragging = false;
             element.releasePointerCapture(event.pointerId);
             element.style.cursor = "grab";
-            if (!movedIds.has(element.dataset.wordId)) {
+            // A click, or a drop back where the word appeared, does not count as placing it
+            const dx = parseFloat(element.style.left) - SPAWN_PX;
+            const dy = parseFloat(element.style.top) - SPAWN_PX;
+            if (!placed && Math.hypot(dx, dy) >= MIN_MOVE_PX) {
+                placed = true;
                 movedIds.add(element.dataset.wordId);
                 enableContinueIfReady();
+                if (typeof onFirstPlaced === "function") {
+                    onFirstPlaced();
+                }
             }
         }
 
@@ -239,8 +378,8 @@ export default function(component) {
         wordDiv.dataset.word = word;
         wordDiv.dataset.wordId = String(currentIndex);
         wordDiv.style.position = "absolute";
-        wordDiv.style.left = "20px";
-        wordDiv.style.top = "20px";
+        wordDiv.style.left = SPAWN_PX + "px";
+        wordDiv.style.top = SPAWN_PX + "px";
 
         plane.appendChild(wordDiv);
         draggable(wordDiv, () => {
@@ -255,7 +394,11 @@ export default function(component) {
         if (movedIds.size !== words.length) {
             return;
         }
-        setTriggerValue("continue_clicked", collectCoords());
+        const rect = plane.getBoundingClientRect();
+        setTriggerValue("continue_clicked", {
+            coords: collectCoords(),
+            plane: [roundTo(rect.width, 1), roundTo(rect.height, 1)],
+        });
     };
 
     while (plane.firstChild) {
@@ -277,12 +420,12 @@ def _build_steps():
         "vft_task_0",
         "spam_instructions",
         "spam_task_0",
-        "interval_1",
         "distractor",
+        "interval_1",
         "vft_task_1",
         "spam_task_1",
-        "interval_2",
         "distractor",
+        "interval_2",
         "vft_task_2",
         "spam_task_2",
         "exit_poll_instructions",
@@ -321,14 +464,6 @@ def _init():
         "categories": {},   # cat_name -> {"words_and_rts": [...], "words_and_coords": {...}}
     }
 
-    # VFT live state
-    st.session_state.vft_words_and_rts = []
-    st.session_state.word_set = set()
-    st.session_state.vft_start_time = None
-    st.session_state.vft_end_time = None
-    st.session_state.vft_timer_done = False
-    st.session_state.vft_current_input = ""
-
     # Distractor variable
     st.session_state.wait_start_time = None
     st.session_state.wait_end_time = None
@@ -340,57 +475,29 @@ def _init():
 
 def advance():
     st.session_state.step_idx += 1
-    # Reset VFT state whenever we enter a new vft_task step
-    current = st.session_state.steps[st.session_state.step_idx]
-    if current.startswith("vft_task_"):
-        st.session_state.vft_words_and_rts = []
-        st.session_state.word_set = set()
-        st.session_state.vft_start_time = None
-        st.session_state.vft_end_time = None
-        st.session_state.vft_timer_done = False
-        st.session_state.vft_current_input = ""
 
 
 def current_step():
     return st.session_state.steps[st.session_state.step_idx]
 
 
+def answered(required: dict) -> bool:
+    """required: {question label: answer}. Warns about unanswered mandatory questions and
+    returns True only if every one has an answer."""
+    missing = [
+        label for label, value in required.items()
+        if value is None or (isinstance(value, str) and not value.strip())
+    ]
+    if missing:
+        st.warning("Please answer: " + "; ".join(missing))
+        return False
+    return True
+
+
 def cat_for_step(step_name: str):
     """Return the category name for a vft_task_N or spam_task_N step."""
     idx = int(step_name.split("_")[-1])
     return st.session_state.cat_order[idx]
-
-
-@st.fragment(run_every=1)
-def _vft_timer_fragment(cat: str, hi_cat: str):
-    now = time.time()
-    remaining = max(0, math.ceil(st.session_state.vft_end_time - now))
-
-    if remaining <= 0:
-        st.session_state.vft_timer_done = True
-        st.rerun()
-
-    minutes, seconds = divmod(remaining, 60)
-
-    st.title(f"**{hi_cat}** के नाम बताएं, जितने आपको याद हों।")
-    st.markdown(
-        f"<div style='font-size:28px;font-weight:700;'>⏱ {minutes:02d}:{seconds:02d}</div>",
-        unsafe_allow_html=True,
-    )
-
-    def _on_enter():
-        word = st.session_state.vft_current_input.strip()
-        if word and word not in st.session_state.word_set:
-            rt = time.time() - st.session_state.vft_start_time
-            st.session_state.vft_words_and_rts.append((word, round(rt, 3)))
-            st.session_state.word_set.add(word)
-        st.session_state.vft_current_input = ""
-
-    st.text_input(
-        label="हर शब्द के बाद **ENTER** दबाएँ! कृपया **अंग्रेज़ी अक्षरों** का उपयोग करके **हिंदी शब्द** लिखें।",
-        key="vft_current_input",
-        on_change=_on_enter,
-    )
 
 
 @st.fragment(run_every=1)
@@ -412,12 +519,12 @@ def _wait_timer_fragment(wait_seconds: int = 30):
     if ready:
         st.markdown(
             "<div style='font-size:20px;font-weight:600;color:green;'>"
-            "<br>जब आप तैयार हों, तब आगे बढ़ें।<br><br>"
+            "<br>जब आप तैयार हों, तब आगे बढ़ें।<br><br>"
             "</div>",
             unsafe_allow_html=True,
         )
         st.button(
-            "आगे बढ़ें",
+            "आगे बढ़ें",
             key="wait_continue_button",
             disabled=not ready,
             on_click=_on_continue,
@@ -515,21 +622,21 @@ elif step == "gen_instructions":
     gen_block = st.container()
     with gen_block:
         st.text("इस अध्ययन में भाग लेने के लिए धन्यवाद!")
-        st.title("इस में दो चरण हैं:")
+        st.title("इसमें दो चरण हैं:")
         st.markdown("<u>प्रथम चरण में</u>, आपको एक श्रेणी का नाम दिखाया जाएगा।", unsafe_allow_html=True)
         st.markdown(
             "आपको निर्धारित समय सीमा के भीतर उस श्रेणी से संबंधित जितने संभव हो सकें, "
             "उतने शब्द **हिंदी में** टाइप करने होंगे। \n\n जैसे \"कुत्ता\" -> \"kutta\"।"
         )
         st.markdown(
-            "<u>दूसरे चरण में</u>, आप पहले टाइप किए गए हर शब्द को ऐसे व्यवस्थित करें कि समान अर्थ वाले शब्द एक-दूसरे के पास हों।",
+            "<u>दूसरे चरण में</u>, आपको पहले टाइप किए गए हर शब्द को ऐसे व्यवस्थित करना होगा कि समान अर्थ वाले शब्द एक-दूसरे के पास हों।",
             unsafe_allow_html=True,
         )
         st.markdown(
-            "इस अध्ययन में सिर्फ़ 3 श्रेणी होंगे, इसलिए कृपया जितना हो सके उतना सटीकता बनाए रखें।"
+            "इस अध्ययन में सिर्फ़ 3 श्रेणियाँ होंगी, इसलिए कृपया जितनी हो सके उतनी सटीकता बनाए रखें।"
         )
         st.markdown(
-            "टाइप करते समय अथवा वस्तुओं को व्यवस्थित करते समय, शीघ्रता की आवश्यकता नहीं है, सटीकता सबसे महत्वपूर्ण है।"
+            "टाइप करते समय अथवा शब्दों को व्यवस्थित करते समय, शीघ्रता की आवश्यकता नहीं है, सटीकता सबसे महत्वपूर्ण है।"
         )
         st.markdown("जब आप शुरू करने के लिए तैयार हों, **\"शुरू\" दबाएँ।**")
         start_clicked = st.button("शुरू")
@@ -549,13 +656,13 @@ elif step == "vft_instructions":
             "इस चरण में आपको एक श्रेणी का नाम दिखाया जाएगा।"
         )
         st.markdown(
-            "आपको 3 मिनट के भीतर दिखाई गई श्रेणी से संबंधित याद आने वाले सभी शब्द"
+            "आपको 3 मिनट के भीतर दिखाई गई श्रेणी से संबंधित याद आने वाले सभी शब्द "
             "**हिंदी में** टाइप करने हैं।"
         )
         st.markdown("जैसे \"कुत्ता\" -> \"kutta\"।")
-        st.markdown("आपको यह काम 3 अलग-अलग श्रेणी पर करना होगा।")
+        st.markdown("आपको यह काम 3 अलग-अलग श्रेणियों पर करना होगा।")
         st.markdown("हर शब्द टाइप करने के बाद, अगला शब्द टाइप करने के लिए **ENTER** दबाएँ।")
-        st.markdown("जब समय खत्म हो जाएगा, तो आप अपने आप अगले चरण पर चले जाएंगे")
+        st.markdown("समय खत्म होने के बाद, आगे बढ़ने के लिए **आगे बढ़ें** दबाएँ।")
         st.markdown("जब आप तैयार हों, तो **शुरू** दबाएँ!")
         start_clicked = st.button("शुरू")
     if start_clicked:
@@ -570,25 +677,27 @@ elif step.startswith("vft_task_"):
     cat = cat_for_step(step)
     hi_cat = CAT2HI[cat]
 
-    # Initialise timer on first render of this step
-    if st.session_state.vft_end_time is None:
-        st.session_state.vft_start_time = time.time()
-        st.session_state.vft_end_time   = time.time() + VFT_DURATION_SECONDS
-        st.session_state.vft_timer_done = False
+    st.title(f"**{hi_cat}** के नाम बताएं, जितने आपको याद हों।")
 
-    if not st.session_state.vft_timer_done:
-        _vft_timer_fragment(cat, hi_cat)
-    else:
-        st.title(f"**{hi_cat}** के जितनी ज़्यादा नाम बता सकते हैं, बताएं।")
-        st.markdown(
-            "<div style='font-size:28px;font-weight:700;'>⏱ 00:00</div>",
-            unsafe_allow_html=True,
-        )
-        st.info("समय समाप्त! आगे बढ़ने के लिए नीचे दबाएँ।")
-        if st.button("अगली चरण पर जाएं"):
+    vft_component = st.components.v2.component(
+            name="vft_input",
+            html=VFT_COMPONENT_HTML,
+            css=VFT_COMPONENT_CSS,
+            js=VFT_COMPONENT_JS,
+            isolate_styles=True,
+    )
+
+    result = vft_component(
+            key=f"vft-input-{cat}",
+            data={"duration_s": VFT_DURATION_SECONDS},
+            on_finished_change=lambda: None,
+    )
+
+    # Sent once time is up and the participant clicks "आगे बढ़ें": [[word, seconds], ...]
+    if result and result.finished is not None:
             st.session_state.p["categories"][cat] = {
-                "words_and_rts": st.session_state.vft_words_and_rts[:],
-                "words_and_coords": {},
+                    "words_and_rts": [(str(word), float(seconds)) for word, seconds in result.finished],
+                    "words_and_coords": {},
             }
             advance()
             st.rerun()
@@ -601,11 +710,11 @@ elif step == "spam_instructions":
     with spam_instr_block:
         st.title("अब, आप एक स्पेशियल अरेंजमेंट टास्क शुरू करेंगे।")
         st.markdown(
-            "इस श्रेणी में, आपको वे सभी शब्द एक-एक करके दिखाए जाएंगे "
-            "जो आपने पिछले श्रेणी में दर्ज किए थे।"
+            "इस चरण में, आपको वे सभी शब्द एक-एक करके दिखाए जाएंगे "
+            "जो आपने पिछले चरण में दर्ज किए थे।"
         )
         st.markdown(
-            "हम यह जानना चाहते हैं कि आपके अनुसार से आपके उत्तर कितने समान थे। "
+            "हम यह जानना चाहते हैं कि आपके अनुसार आपके उत्तर कितने समान थे। "
             "आपको अपने सभी जवाब ऐसे व्यवस्थित करने हैं कि समान शब्द एक-दूसरे के पास हों।"
         )
         st.markdown(
@@ -620,7 +729,7 @@ elif step == "spam_instructions":
             "आप पहले से रखे गए शब्दों को फिर से व्यवस्थित कर सकते हैं।"
         )
         st.markdown(
-            "**सभी** शब्दों को कम से कम एक बार व्यवस्थित के बाद ही "
+            "**सभी** शब्दों को कम से कम एक बार व्यवस्थित करने के बाद ही "
             "\"आगे बढ़ें\" बटन दिखाई देगा।"
         )
         st.markdown("जब आप तैयार हों, तो **शुरू** दबाएँ।")
@@ -641,7 +750,7 @@ elif step.startswith("spam_task_"):
     ]
 
     if not words:
-        st.warning("इस वर्ग में कोई शब्द नहीं मिले। अगले चरण पर जाएं।")
+        st.warning("इस श्रेणी में कोई शब्द नहीं मिला। अगले चरण पर जाएं।")
         if st.button("आगे बढ़ें"):
             advance()
             st.rerun()
@@ -649,7 +758,7 @@ elif step.startswith("spam_task_"):
 
     st.title("शब्दों को नीचे दिए गए क्षेत्र में व्यवस्थित करें।")
     st.markdown(
-        "हर शब्द को कम से कम एक बार हटाएँ। सभी शब्द व्यवस्थित होने के बाद **आगे बढ़ें** बटन दिखाई देगा।"
+        "हर शब्द को कम से कम एक बार खिसकाएँ। सभी शब्द व्यवस्थित होने के बाद **आगे बढ़ें** बटन दिखाई देगा।"
     )
 
     spam_component = st.components.v2.component(
@@ -667,12 +776,17 @@ elif step.startswith("spam_task_"):
     )
 
     if result and result.continue_clicked:
-            coords_raw = result.continue_clicked
+            # {"coords": {word: [x, y]}, "plane": [width_px, height_px]}
+            payload = result.continue_clicked
+            coords_raw = payload.get("coords") if isinstance(payload, dict) else None
             if isinstance(coords_raw, dict) and len(coords_raw) == len(words):
                     st.session_state.p["categories"][cat]["words_and_coords"] = {
                             word: (float(coords_raw[word][0]), float(coords_raw[word][1]))
                             for word in coords_raw
                     }
+                    st.session_state.p["categories"][cat]["plane_px"] = [
+                            float(v) for v in payload.get("plane") or []
+                    ]
                     advance()
                     st.rerun()
             else:
@@ -686,13 +800,12 @@ elif step == "distractor":
         st.session_state.wait_end_time   = time.time() + WAIT_DURATION_SECONDS
         st.session_state.wait_timer_done = False
     if not st.session_state.wait_timer_done:
-        _wait_timer_fragment()
+        _wait_timer_fragment(WAIT_DURATION_SECONDS)
     else:
-        st.info("समय समाप्त! आगे बढ़ने के लिए नीचे दबाएँ।")
-        if st.button("अगली चरण पर जाएं"):
-            advance()
-            st.session_state.wait_end_time = None
-            st.rerun()
+        # The fragment's "आगे बढ़ें" button set wait_timer_done: move on straight away
+        st.session_state.wait_end_time = None
+        advance()
+        st.rerun()
 
 # Interval
 elif step.startswith("interval_"):
@@ -736,13 +849,17 @@ elif step == "exit_poll_1":
     strats_1 = st.text_area("What strategies, if any, did you use while attempting the task for Animals?")
     strats_2 = st.text_area("What strategies, if any, did you use while attempting the task for Body Parts?")
     strats_3 = st.text_area("What strategies, if any, did you use while attempting the task for Fruits and Vegetables?")
-    strats_4 = st.text_area("What strategies, if any, did you use while attempting the task for Items found in a Marketplace")
-    strats = [strats_1, strats_2, strats_3, strats_4]
-    hi_r = st.radio("How comfortable are you with reading Hindi in Devanagari?*",  opts, horizontal=True)
-    hi_w = st.radio("How comfortable are you with writing Hindi in the English alphabet?*", opts, horizontal=True)
-    en_r = st.radio("How comfortable are you with reading English?*",  opts, horizontal=True)
-    en_w = st.radio("How comfortable are you with writing English?*", opts, horizontal=True)
-    if st.button("Continue"):
+    strats = [strats_1, strats_2, strats_3]
+    hi_r = st.radio("How comfortable are you with reading Hindi in Devanagari?*",  opts, index=None, horizontal=True)
+    hi_w = st.radio("How comfortable are you with writing Hindi in the English alphabet?*", opts, index=None, horizontal=True)
+    en_r = st.radio("How comfortable are you with reading English?*",  opts, index=None, horizontal=True)
+    en_w = st.radio("How comfortable are you with writing English?*", opts, index=None, horizontal=True)
+    if st.button("Continue") and answered({
+        "reading Hindi in Devanagari": hi_r,
+        "writing Hindi in the English alphabet": hi_w,
+        "reading English": en_r,
+        "writing English": en_w,
+    }):
         st.session_state.p.update(
             strats=strats, hi_r=hi_r, hi_w=hi_w, en_r=en_r, en_w=en_w
         )
@@ -759,9 +876,12 @@ elif step == "exit_poll_2":
 
     def _add_lang():
         lang = st.session_state._lang_input.strip()
-        if lang and lang not in st.session_state.lang_list:
+        if lang and lang.lower() not in [l.lower() for l in st.session_state.lang_list]:
             st.session_state.lang_list.append(lang)
         st.session_state._lang_input = ""
+
+    def _remove_lang(index):
+        st.session_state.lang_list.pop(index)
 
     st.text_input(
         "Enter each language you know and press **Enter**:",
@@ -769,15 +889,29 @@ elif step == "exit_poll_2":
         on_change=_add_lang,
     )
     if st.session_state.lang_list:
-        st.write("Languages entered:", st.session_state.lang_list)
+        st.write("Languages entered:")
+        for i, lang in enumerate(st.session_state.lang_list):
+            name_col, remove_col = st.columns([4, 1])
+            name_col.write(lang)
+            remove_col.button("Remove", key=f"remove_lang_{i}_{lang}", on_click=_remove_lang, args=(i,))
 
     if len(st.session_state.lang_list) >= int(lang_count):
         if st.button("Continue"):
-            st.session_state.p["first_lang"]  = first_lang
-            st.session_state.p["lang_count"]  = int(lang_count)
-            st.session_state.p["lang_list"]   = st.session_state.lang_list[:]
-            advance()
-            st.rerun()
+            known = [l.lower() for l in st.session_state.lang_list]
+            if answered({"first language": first_lang}):
+                if len(known) != int(lang_count):
+                    st.warning(
+                        f"You said you know {int(lang_count)} language(s) but listed {len(known)}. "
+                        "Please correct the number or the list."
+                    )
+                elif first_lang.strip().lower() not in known:
+                    st.warning("Please also add your first language to the list of languages you know.")
+                else:
+                    st.session_state.p["first_lang"]  = first_lang.strip()
+                    st.session_state.p["lang_count"]  = int(lang_count)
+                    st.session_state.p["lang_list"]   = st.session_state.lang_list[:]
+                    advance()
+                    st.rerun()
     else:
         remaining_langs = int(lang_count) - len(st.session_state.lang_list)
         st.info(f"Please enter {remaining_langs} more language(s).")
@@ -793,8 +927,8 @@ elif step == "exit_poll_3":
     opts = ["1 - Least Proficient", "2", "3", "4", "5 - Most Proficient"]
     lang_prof = {}
     for lang in st.session_state.p.get("lang_list", []):
-        lang_prof[lang] = st.radio(f"Proficiency in **{lang}**", opts, horizontal=True, key=f"prof_{lang}")
-    if st.button("Continue"):
+        lang_prof[lang] = st.radio(f"Proficiency in **{lang}**", opts, index=None, horizontal=True, key=f"prof_{lang}")
+    if st.button("Continue") and answered({f"proficiency in {lang}": value for lang, value in lang_prof.items()}):
         st.session_state.p["lang_prof"] = lang_prof
         advance()
         st.rerun()
@@ -805,16 +939,23 @@ elif step == "exit_poll_3":
 elif step == "exit_poll_4":
     st.header("Follow Up Questions:")
     st.markdown(
-        "Rank each language by when you acquired it (1 = first language learnt).*"
+        "Rank each language by when you acquired it (1 = learnt first). "
+        "If you learnt languages at the same time, give them the same number.*"
     )
-    opts = ["1 - First", "2", "3", "4", "5 - Last"]
+    langs = st.session_state.p.get("lang_list", [])
+    opts = [str(rank) for rank in range(1, len(langs) + 1)]
     lang_order = {}
-    for lang in st.session_state.p.get("lang_list", []):
-        lang_order[lang] = st.radio(f"Order for **{lang}**", opts, horizontal=True, key=f"order_{lang}")
-    if st.button("Continue"):
-        st.session_state.p["lang_order"] = lang_order
-        advance()
-        st.rerun()
+    for lang in langs:
+        lang_order[lang] = st.radio(f"Order for **{lang}**", opts, index=None, horizontal=True, key=f"order_{lang}")
+    if st.button("Continue") and answered({f"order for {lang}": value for lang, value in lang_order.items()}):
+        first = st.session_state.p.get("first_lang", "").lower()
+        first_rank = next((rank for lang, rank in lang_order.items() if lang.lower() == first), None)
+        if first_rank != "1":
+            st.warning(f"Your first language ({st.session_state.p.get('first_lang')}) should be ranked 1.")
+        else:
+            st.session_state.p["lang_order"] = lang_order
+            advance()
+            st.rerun()
 
 
 
@@ -842,8 +983,11 @@ elif step == "exit_poll_5":
         "Uttar Pradesh", "Uttarakhand",
         "West Bengal",
     ]
-    loc = st.selectbox("Which state or union territory of India are you from?*", states_and_uts)
-    if st.button("Continue"):
+    loc = st.selectbox(
+        "Which state or union territory of India are you from?*", states_and_uts,
+        index=None, placeholder="Choose a state or union territory",
+    )
+    if st.button("Continue") and answered({"state or union territory": loc}):
         st.session_state.p["location"] = loc
         advance()
         st.rerun()
@@ -853,13 +997,13 @@ elif step == "exit_poll_5":
 # Exit Poll 6 - gender / age / education
 elif step == "exit_poll_6":
     st.header("Follow Up Questions:")
-    gender = st.radio("What is your gender?*", ["Male", "Female", "Other/Prefer not to say"], horizontal=True)
-    age    = st.number_input("What is your age?*", min_value=18, max_value=100, step=1)
+    gender = st.radio("What is your gender?*", ["Male", "Female", "Other/Prefer not to say"], index=None, horizontal=True)
+    age    = st.number_input("What is your age?*", min_value=18, max_value=100, step=1, value=None)
     edu    = st.number_input(
         "Years of formal education completed? (High school graduation = 12)*",
-        min_value=0, max_value=30, step=1,
+        min_value=0, max_value=30, step=1, value=None,
     )
-    if st.button("Continue"):
+    if st.button("Continue") and answered({"gender": gender, "age": age, "years of formal education": edu}):
         st.session_state.p.update(gender=gender, age=int(age), edu=int(edu))
         advance()
         st.rerun()
@@ -869,10 +1013,12 @@ elif step == "exit_poll_6":
 # Exit Poll 7 - dominant hand / alertness
 elif step == "exit_poll_7":
     st.header("Follow Up Questions:")
-    dom_hand = st.radio("What is your dominant hand?", ["Right", "Left", "Both"], horizontal=True)
+    # Optional questions: None (left blank) is saved as is
+    dom_hand = st.radio("What is your dominant hand?", ["Right", "Left", "Both"], index=None, horizontal=True)
     alert_tod = st.radio(
         "At what time of day do you feel most alert?",
         ["Morning", "Afternoon", "Evening", "Night", "No Difference"],
+        index=None,
         horizontal=True,
     )
     if st.button("Continue"):
